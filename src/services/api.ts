@@ -1,6 +1,6 @@
 import type { DashboardResponse, ImportResponse, LoginResponse, CreateUserPayload, ManagedUser, ManualRowUpdate, MenuKey, RowsResponse, RunMetadata, TableFilters, UpdateRolePermissionsPayload, UpdateUserPayload, UserAuditLog, UserSession, RoleDefinition } from "../types/reconciliation";
 
-const API_URL = import.meta.env.VITE_API_URL ?? "";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4108";
 const TOKEN_KEY = "conciliacion_cultura_uno_token";
 
 export function getStoredToken(): string {
@@ -90,6 +90,20 @@ export async function importReconciliation(entrada: File, pago: File, qr?: File 
     body: formData,
   });
   return parseResponse<ImportResponse>(response);
+}
+
+export async function appendMonthToRun(runId: string, entrada: File, pago: File, qr?: File | null): Promise<ImportResponse & { appendedRows: number; duplicateRowsSkipped: number }> {
+  const formData = new FormData();
+  formData.append("entrada", entrada);
+  formData.append("pago", pago);
+  if (qr) formData.append("qr", qr);
+
+  const response = await fetch(`${API_URL}/api/runs/${runId}/append`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: formData,
+  });
+  return parseResponse<ImportResponse & { appendedRows: number; duplicateRowsSkipped: number }>(response);
 }
 
 export async function fetchRows(runId: string, menu: MenuKey, filters: TableFilters): Promise<RowsResponse> {

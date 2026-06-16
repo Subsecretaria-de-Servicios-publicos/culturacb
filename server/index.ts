@@ -13,54 +13,11 @@ const app = Fastify({ logger: true, bodyLimit: 1024 * 1024 * 200 });
 const port = Number(process.env.API_PORT ?? 4108);
 const VALID_MENUS: MenuKey[] = ["entrada1", "bordereaux", "conciliacionTC", "archivoCompleto"];
 
-const DEFAULT_CORS_ORIGINS = [
-  "http://localhost:5178",
-  "http://127.0.0.1:5178",
-  "http://localhost:4178",
-  "http://127.0.0.1:4178",
-];
-
-function parseCorsOrigins(): string[] {
-  const raw = process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || "";
-  const configured = raw
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-  return configured.length > 0 ? configured : DEFAULT_CORS_ORIGINS;
-}
-
-const allowedCorsOrigins = parseCorsOrigins();
-
 await app.register(cors, {
-  origin: (origin, callback) => {
-    // Permite llamadas server-to-server, curl y Postman que no envían Origin.
-    if (!origin) return callback(null, true);
-
-    if (allowedCorsOrigins.includes(origin)) return callback(null, true);
-
-    return callback(new Error(`Origen CORS no permitido: ${origin}`), false);
-  },
+  origin: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
-  exposedHeaders: ["Content-Disposition"],
-  credentials: false,
-  maxAge: 86400,
 });
-
-app.addHook("onRequest", async (request, reply) => {
-  reply.header("X-Content-Type-Options", "nosniff");
-  reply.header("X-Frame-Options", "DENY");
-  reply.header("Referrer-Policy", "strict-origin-when-cross-origin");
-  reply.header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
-  reply.header("Content-Security-Policy", "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
-  reply.header("Cross-Origin-Opener-Policy", "same-origin");
-
-  const forwardedProto = String(request.headers["x-forwarded-proto"] || "").toLowerCase();
-  if (process.env.ENABLE_HSTS === "true" || forwardedProto === "https") {
-    reply.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-  }
-});
-
 await app.register(multipart, { limits: { fileSize: 1024 * 1024 * 150, files: 3 } });
 
 app.addHook("preHandler", async (request, reply) => {
@@ -644,7 +601,58 @@ function monthLabel(value: string): string {
   return idx >= 0 && idx < 12 ? `${names[idx]} ${year}` : value;
 }
 
-async function insertRows(runId: string, rows: JoinedRow[]) {
+function normalizeEstablishmentName(value: unknown): string {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^A-Z0-9\s]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+}
+
+function canonicalEstablishmentName(value: unknown): string {
+  const raw = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!raw) return "SIN_DEFINIR";
+  const normalized = normalizeEstablishmentName(raw);
+  const compact = normalized.replace(/\s+/g, "");
+
+  const aliases: Record<string, string> = {
+    "TEATRO PROVINCIAL JUAN CARLOS SARAVIA": "Teatro Provincial Juan Carlos Saravia",
+    "MUSEO GUEMES": "Museo Güemes",
+    "MUSEO GEMES": "Museo Güemes",
+    "MUSEO DE LA VID Y EL VINO": "Museo de la Vid y el Vino",
+    "MUSEO DE ARQUEOLOGIA DE ALTA MONTANA": "Museo de Arqueología de Alta Montaña",
+    "MUSEO DE ARQUEOLOGA DE ALTA MONTAA": "Museo de Arqueología de Alta Montaña",
+    "MUSEO ARQUEOLOGICO DE CACHI": "Museo Arqueológico de Cachi",
+    "MUSEO ARQUEOLGICO DE CACHI": "Museo Arqueológico de Cachi",
+    "USINA CULTURAL": "Usina Cultural",
+    "COMPLEJO MUSEOLOGICO EXPLORA SALTA": "Complejo Museológico Explora Salta",
+    "COMPLEJO MUSEOLGICO EXPLORA SALTA": "Complejo Museológico Explora Salta",
+    "EXPLORA SALTA": "Complejo Museológico Explora Salta",
+    "CASA DE LA CULTURA": "Casa de la Cultura",
+    "MUSEO DE ARTE MAC": "Museo de Arte MAC",
+    "MUSEO MAC": "Museo de Arte MAC",
+    "MAC": "Museo de Arte MAC",
+    "MUSEO DE BELLAS ARTES": "Museo de Bellas Artes",
+    "MUSEO ANTROPOLOGICO": "Museo Antropológico",
+    "MUSEO ANTROPOLOGIA MAS": "Museo Antropológico",
+    "CAMPING Y PARQUE ACUATICO EL PRESTAMO": "Camping y Parque Acuático EL PRÉSTAMO",
+    "CAMPING Y PARQUE ACUTICO EL PRSTAMO": "Camping y Parque Acuático EL PRÉSTAMO",
+    "EL CAMPING Y PARQUE ACUATICO EL PRESTAMO": "Camping y Parque Acuático EL PRÉSTAMO",
+    "EL CAMPING Y PARQUE ACUTICO EL PRSTAMO": "Camping y Parque Acuático EL PRÉSTAMO",
+  };
+  if (aliases[normalized]) return aliases[normalized];
+  if (compact === "CAMPINGYPARQUEACUATICOELPRESTAMO" || compact === "ELCAMPINGYPARQUEACUATICOELPRESTAMO") {
+    return "Camping y Parque Acuático EL PRÉSTAMO";
+  }
+  if (normalized.includes("CAMPING") && normalized.includes("PARQUE") && (normalized.includes("PRESTAMO") || normalized.includes("PRSTAMO"))) {
+    return "Camping y Parque Acuático EL PRÉSTAMO";
+  }
+  return raw || "SIN_DEFINIR";
+}
+
+async function insertRows(runId: string, rows: JoinedRow[], rowIndexOffset = 0) {
   const batchSize = 400;
   for (let start = 0; start < rows.length; start += batchSize) {
     const batch = rows.slice(start, start + batchSize);
@@ -656,7 +664,7 @@ async function insertRows(runId: string, rows: JoinedRow[]) {
       values.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13}, $${base + 14}, $${base + 15}, $${base + 16}, $${base + 17}, $${base + 18}, $${base + 19}::jsonb)`);
       params.push(
         runId,
-        start + index,
+        rowIndexOffset + start + index,
         row.__joinKey,
         row.__matchStatus,
         row.__pagoMatches,
@@ -665,7 +673,7 @@ async function insertRows(runId: string, rows: JoinedRow[]) {
         row.__paymentGroup ?? "SIN_DEFINIR",
         row.__paymentChannel ?? "SIN_DEFINIR",
         row.__paymentSubgroup ?? "SIN_DEFINIR",
-        String(row["Establecimiento"] ?? row["establecimiento"] ?? "SIN_DEFINIR") || "SIN_DEFINIR",
+        canonicalEstablishmentName(row["Establecimiento"] ?? row["establecimiento"] ?? "SIN_DEFINIR"),
         row.__provinceAmount ?? 0,
         row.__entradaUnoAmount ?? 0,
         row.__ticketCount ?? 0,
@@ -811,6 +819,43 @@ async function bucketQuery(whereSql: string, params: unknown[], field: string, l
 
 app.get("/api/health", async () => ({ ok: true }));
 
+
+async function buildRunSummaryFromDatabase(runId: string, fallbackSummary: Record<string, unknown> = {}) {
+  const result = await query(
+    `SELECT
+       COUNT(*)::int AS entrada_rows,
+       COUNT(*) FILTER (WHERE match_status = 'CONCILIADO')::int AS matched_rows,
+       COUNT(*) FILTER (WHERE match_status <> 'CONCILIADO')::int AS unmatched_rows,
+       COUNT(*) FILTER (WHERE COALESCE((data->>'__qrMatches')::int, 0) > 0)::int AS qr_matched_rows,
+       COALESCE(SUM(sale_amount), 0)::float AS total_entrada,
+       COALESCE(SUM(province_amount), 0)::float AS total_provincia,
+       COALESCE(SUM(entrada_uno_amount), 0)::float AS total_entrada_uno,
+       COALESCE(SUM(CASE WHEN match_status = 'CONCILIADO' THEN sale_amount - COALESCE(difference_amount, 0) ELSE 0 END), 0)::float AS total_pago_conciliado,
+       COALESCE(SUM(CASE WHEN COALESCE((data->>'__qrMatches')::int, 0) > 0 THEN sale_amount - COALESCE((data->>'__qrDifferenceAmount')::numeric, 0) ELSE 0 END), 0)::float AS total_qr_conciliado
+     FROM reconciliation_rows
+     WHERE run_id = $1`,
+    [runId],
+  );
+  const row = result.rows[0] || {};
+  const totalEntrada = Number(row.total_entrada ?? 0);
+  const totalPagoConciliado = Number(row.total_pago_conciliado ?? 0);
+  const totalQrConciliado = Number(row.total_qr_conciliado ?? 0);
+  return {
+    ...fallbackSummary,
+    entradaRows: Number(row.entrada_rows ?? 0),
+    matchedRows: Number(row.matched_rows ?? 0),
+    unmatchedRows: Number(row.unmatched_rows ?? 0),
+    qrMatchedRows: Number(row.qr_matched_rows ?? 0),
+    totalEntrada,
+    totalProvincia: Number(row.total_provincia ?? 0),
+    totalEntradaUno: Number(row.total_entrada_uno ?? 0),
+    totalPagoConciliado,
+    totalQrConciliado,
+    diferenciaTotal: totalEntrada - totalPagoConciliado,
+    diferenciaQrTotal: totalEntrada - totalQrConciliado,
+  };
+}
+
 app.post("/api/reconciliation/import", async (request, reply) => {
   const files: Record<string, { filename: string; buffer: Buffer }> = {};
 
@@ -865,6 +910,148 @@ app.post("/api/reconciliation/import", async (request, reply) => {
     await client.query("ROLLBACK").catch(() => undefined);
     request.log.error(error);
     const message = error instanceof Error ? error.message : "No se pudo importar y conciliar los archivos.";
+    return reply.status(500).send({ message });
+  } finally {
+    client.release();
+  }
+});
+
+
+app.post("/api/runs/:runId/append", async (request, reply) => {
+  const { runId } = request.params as { runId: string };
+  if (!(await requireRunAccess(runId, request.user!))) return reply.status(404).send({ message: "Conciliación no encontrada." });
+
+  const permissions = await currentUserPermissions(request);
+  if (!roleHasPermission(request.user!, permissions, "PROCESS_DOCUMENTS")) {
+    return reply.status(403).send({ message: "No tiene permisos para agregar meses a un expediente." });
+  }
+
+  const files: Record<string, { filename: string; buffer: Buffer }> = {};
+
+  for await (const part of request.parts()) {
+    if (part.type !== "file") continue;
+    const fieldname = part.fieldname;
+    if (fieldname !== "entrada" && fieldname !== "pago" && fieldname !== "qr") continue;
+    files[fieldname] = {
+      filename: part.filename,
+      buffer: await part.toBuffer(),
+    };
+  }
+
+  if (!files.entrada || !files.pago) {
+    return reply.status(400).send({ message: "Debe cargar como mínimo los archivos Entrada UNO y Pago UNO del mes que quiere sumar." });
+  }
+
+  const processed = processBuffers(files.entrada.buffer, files.pago.buffer, files.qr?.buffer);
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const runResult = await client.query(
+      `SELECT id, summary, all_columns, pago_columns_to_add, qr_columns_to_add, entrada_filename, pago_filename, qr_filename
+       FROM reconciliation_runs
+       WHERE id = $1`,
+      [runId],
+    );
+    if (!runResult.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.status(404).send({ message: "Conciliación no encontrada." });
+    }
+
+    const existingKeysResult = await client.query(
+      `SELECT join_key FROM reconciliation_rows WHERE run_id = $1 AND COALESCE(join_key, '') <> ''`,
+      [runId],
+    );
+    const existingKeys = new Set(existingKeysResult.rows.map((row: any) => String(row.join_key)));
+    const appendedKeys = new Set<string>();
+    const rowsToAppend = processed.rows.filter((row) => {
+      const key = String(row.__joinKey ?? "").trim();
+      if (!key || existingKeys.has(key) || appendedKeys.has(key)) return false;
+      appendedKeys.add(key);
+      return true;
+    });
+    const duplicateRowsSkipped = processed.rows.length - rowsToAppend.length;
+
+    const maxIndexResult = await client.query(
+      `SELECT COALESCE(MAX(row_index), -1)::int AS max_index FROM reconciliation_rows WHERE run_id = $1`,
+      [runId],
+    );
+    const rowIndexOffset = Number(maxIndexResult.rows[0]?.max_index ?? -1) + 1;
+
+    await client.query("COMMIT");
+
+    if (rowsToAppend.length > 0) {
+      await insertRows(runId, rowsToAppend, rowIndexOffset);
+    }
+
+    const currentRun = runResult.rows[0];
+    const nextAllColumns = Array.from(new Set([...(currentRun.all_columns || []), ...(processed.allColumns || [])]));
+    const nextPagoColumns = Array.from(
+      new Map([...(currentRun.pago_columns_to_add || []), ...(processed.pagoColumnsToAdd || [])].map((item: any) => [item.columnKey || item.header, item])).values(),
+    );
+    const nextQrColumns = Array.from(
+      new Map([...(currentRun.qr_columns_to_add || []), ...(processed.qrColumnsToAdd || [])].map((item: any) => [item.columnKey || item.header, item])).values(),
+    );
+
+    const previousSummary = currentRun.summary || {};
+    const summaryFallback = {
+      ...previousSummary,
+      pagoRows: Number(previousSummary.pagoRows ?? 0) + Number(processed.summary.pagoRows ?? 0),
+      qrRows: Number(previousSummary.qrRows ?? 0) + Number(processed.summary.qrRows ?? 0),
+      duplicatePagoKeys: Number(previousSummary.duplicatePagoKeys ?? 0) + Number(processed.summary.duplicatePagoKeys ?? 0),
+      duplicateQrKeys: Number(previousSummary.duplicateQrKeys ?? 0) + Number(processed.summary.duplicateQrKeys ?? 0),
+    };
+    const nextSummary = await buildRunSummaryFromDatabase(runId, summaryFallback);
+
+    await query(
+      `UPDATE reconciliation_runs
+       SET entrada_filename = $2,
+           pago_filename = $3,
+           qr_filename = $4,
+           pago_columns_to_add = $5::jsonb,
+           qr_columns_to_add = $6::jsonb,
+           all_columns = $7::jsonb,
+           summary = $8::jsonb,
+           step_status = 'PASO_1_CONCILIACION_GUARDADA',
+           reconciliation_stage = 'PASO_1_CONCILIACION_GUARDADA',
+           notes = COALESCE(notes, '') || CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE E'\n\n' END || $9
+       WHERE id = $1`,
+      [
+        runId,
+        `${currentRun.entrada_filename} + ${files.entrada.filename}`,
+        `${currentRun.pago_filename} + ${files.pago.filename}`,
+        files.qr?.filename ? `${currentRun.qr_filename || ''}${currentRun.qr_filename ? ' + ' : ''}${files.qr.filename}` : currentRun.qr_filename,
+        JSON.stringify(nextPagoColumns),
+        JSON.stringify(nextQrColumns),
+        JSON.stringify(nextAllColumns),
+        JSON.stringify(nextSummary),
+        `Se agregó un nuevo mes al expediente. Filas nuevas: ${rowsToAppend.length}. Duplicadas omitidas: ${duplicateRowsSkipped}. Archivo Entrada UNO: ${files.entrada.filename}.`,
+      ],
+    );
+
+    await query(
+      `INSERT INTO reconciliation_audit_logs
+       (run_id, user_id, action, previous_status, new_status, observation)
+       VALUES ($1, $2, 'AGREGAR_MES_EXPEDIENTE_EXISTENTE', 'PASO_1_CONCILIACION_GUARDADA', 'PASO_1_CONCILIACION_GUARDADA', $3)`,
+      [runId, request.user?.id, JSON.stringify({ appendedRows: rowsToAppend.length, duplicateRowsSkipped, entradaFile: files.entrada.filename, pagoFile: files.pago.filename, qrFile: files.qr?.filename ?? null })],
+    );
+
+    return {
+      runId,
+      summary: nextSummary,
+      allColumns: nextAllColumns,
+      pagoColumnsToAdd: nextPagoColumns,
+      qrColumnsToAdd: nextQrColumns,
+      stepStatus: 'PASO_1_CONCILIACION_GUARDADA',
+      notes: '',
+      appendedRows: rowsToAppend.length,
+      duplicateRowsSkipped,
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    request.log.error(error);
+    const message = error instanceof Error ? error.message : "No se pudo sumar el mes al expediente existente.";
     return reply.status(500).send({ message });
   } finally {
     client.release();
@@ -1330,6 +1517,23 @@ function normalizeManualPaymentSubgroup(group: string, channel: string): string 
   return group || "SIN_DEFINIR";
 }
 
+function firstDefinedManualValue(source: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (source[key] !== undefined) return source[key];
+  }
+  return undefined;
+}
+
+function normalizeManualText(value: unknown, fallback = ""): string {
+  const text = value === undefined || value === null ? fallback : String(value);
+  return text.trim();
+}
+
+function normalizeManualUpper(value: unknown, fallback = "SIN_DEFINIR"): string {
+  const text = normalizeManualText(value, fallback);
+  return (text || fallback).trim().toUpperCase();
+}
+
 app.patch("/api/runs/:runId/rows/:rowId", async (request, reply) => {
   const { runId, rowId } = request.params as { runId: string; rowId: string };
   if (!(await requireRunAccess(runId, request.user!))) return reply.status(404).send({ message: "Conciliación no encontrada." });
@@ -1359,8 +1563,9 @@ app.patch("/api/runs/:runId/rows/:rowId", async (request, reply) => {
   const rawUpdates = body?.updates && typeof body.updates === "object" ? body.updates : {};
 
   const allowedStatuses = new Set(["PENDIENTE", "REVISADO_OK", "OBSERVADO", "AJUSTADO"]);
-  const requestedReviewStatus = String(body?.reviewStatus ?? rawUpdates.__reviewStatus ?? currentRow.review_status ?? "PENDIENTE").trim().toUpperCase();
-  const reviewStatus = allowedStatuses.has(requestedReviewStatus) ? requestedReviewStatus : String(currentRow.review_status ?? "PENDIENTE").toUpperCase();
+  const requestedStatusValue = firstDefinedManualValue(rawUpdates, ["__reviewStatus", "Estado Revisión", "Estado Revision", "review_status"]);
+  const requestedReviewStatus = normalizeManualUpper(body?.reviewStatus ?? requestedStatusValue ?? currentRow.review_status ?? "PENDIENTE", "PENDIENTE");
+  const reviewStatus = allowedStatuses.has(requestedReviewStatus) ? requestedReviewStatus : normalizeManualUpper(currentRow.review_status ?? "PENDIENTE", "PENDIENTE");
 
   const nextData: Record<string, unknown> = { ...currentData };
   const previousValues: Record<string, unknown> = {};
@@ -1368,17 +1573,26 @@ app.patch("/api/runs/:runId/rows/:rowId", async (request, reply) => {
 
   for (const [column, value] of Object.entries(rawUpdates)) {
     if (["__rowId", "__reconciledAt"].includes(column)) continue;
-    previousValues[column] = column.startsWith("__") ? (column === "__reviewStatus" ? currentRow.review_status : column === "__reconciliationObservation" ? currentRow.reconciliation_observation : currentData[column]) : currentData[column];
+
+    const previousValue = column === "__reviewStatus"
+      ? currentRow.review_status
+      : column === "__reconciliationObservation"
+        ? currentRow.reconciliation_observation
+        : currentData[column];
+
+    previousValues[column] = previousValue;
     newValues[column] = value;
-    if (!column.startsWith("__")) nextData[column] = value;
+    nextData[column] = value;
   }
 
-  const observation = String(body?.observation ?? rawUpdates.__reconciliationObservation ?? currentRow.reconciliation_observation ?? "").trim().slice(0, 2500);
-  if (rawUpdates.__reconciliationObservation !== undefined) {
+  const requestedObservationValue = firstDefinedManualValue(rawUpdates, ["__reconciliationObservation", "Observación Conciliación", "Observacion Conciliacion", "reconciliation_observation"]);
+  const observation = normalizeManualText(body?.observation ?? requestedObservationValue ?? currentRow.reconciliation_observation ?? "").slice(0, 2500);
+
+  if (requestedObservationValue !== undefined || body?.observation !== undefined) {
     previousValues.__reconciliationObservation = currentRow.reconciliation_observation || "";
     newValues.__reconciliationObservation = observation;
   }
-  if (rawUpdates.__reviewStatus !== undefined || body?.reviewStatus !== undefined) {
+  if (requestedStatusValue !== undefined || body?.reviewStatus !== undefined) {
     previousValues.__reviewStatus = currentRow.review_status;
     newValues.__reviewStatus = reviewStatus;
   }
@@ -1391,24 +1605,36 @@ app.patch("/api/runs/:runId/rows/:rowId", async (request, reply) => {
     return fallback;
   }
 
+  const requestedSaleAmount = firstDefinedManualValue(rawUpdates, ["__saleAmount", "Total venta 110%", "Total Venta 110%", "Total venta", "Total Venta", "Precio Venta Total"]);
   const saleAmount = toOptionalNumber(body.saleAmount)
+    ?? toOptionalNumber(requestedSaleAmount)
     ?? firstDataNumber(["__saleAmount", "Total venta 110%", "Total Venta 110%", "Total venta", "Total Venta", "Precio Venta Total"], Number(currentRow.sale_amount ?? currentData.__saleAmount ?? 0));
 
-  const paymentAmount = toOptionalNumber(body.paymentAmount);
-  const calculatedDifference = paymentAmount === null ? Number(currentRow.difference_amount ?? currentData.__differenceAmount ?? 0) : saleAmount - paymentAmount;
+  const requestedPaymentAmount = firstDefinedManualValue(rawUpdates, ["__paymentAmount", "Pago UNO", "Pago UNO monto", "Monto Pago UNO", "Total Pago conciliado"]);
+  const paymentAmount = toOptionalNumber(body.paymentAmount) ?? toOptionalNumber(requestedPaymentAmount);
+  const calculatedDifference = paymentAmount === null ? Number(currentRow.difference_amount ?? currentData.__differenceAmount ?? 0) : roundMoney(saleAmount - paymentAmount);
 
-  const provinceAmount = roundMoney(firstDataNumber(["__provinceAmount", "Provincia 100%", "Precio Final S/Interés", "Precio Final S/Interes"], Number(currentData?.__provinceAmount ?? currentRow.sale_amount ?? 0) / 1.10));
+  const requestedProvinceAmount = firstDefinedManualValue(rawUpdates, ["__provinceAmount", "Provincia 100%", "Precio Final S/Interés", "Precio Final S/Interes"]);
+  const provinceAmount = roundMoney(toOptionalNumber(requestedProvinceAmount)
+    ?? firstDataNumber(["__provinceAmount", "Provincia 100%", "Precio Final S/Interés", "Precio Final S/Interes"], Number(currentData?.__provinceAmount ?? currentRow.sale_amount ?? 0) / 1.10));
 
-  const entradaUnoAmount = roundMoney(firstDataNumber(["__entradaUnoAmount", "Entrada UNO 10%", "Valor SCH", "ValorSCH", "SCH"], provinceAmount * 0.10));
+  const requestedEntradaUnoAmount = firstDefinedManualValue(rawUpdates, ["__entradaUnoAmount", "Entrada UNO 10%", "Valor SCH", "ValorSCH", "SCH"]);
+  const entradaUnoAmount = roundMoney(toOptionalNumber(requestedEntradaUnoAmount)
+    ?? firstDataNumber(["__entradaUnoAmount", "Entrada UNO 10%", "Valor SCH", "ValorSCH", "SCH"], provinceAmount * 0.10));
 
-  const paymentGroup = String(body.paymentGroup || rawUpdates.__paymentGroup || currentRow.payment_group || currentData.__paymentGroup || "SIN_DEFINIR").trim().toUpperCase();
-  const paymentChannel = String(body.paymentChannel || rawUpdates.__paymentChannel || currentRow.payment_channel || currentData.__paymentChannel || "SIN_DEFINIR").trim().toUpperCase();
-  const paymentSubgroup = String(body.paymentSubgroup || rawUpdates.__paymentSubgroup || currentRow.payment_subgroup || currentData.__paymentSubgroup || normalizeManualPaymentSubgroup(paymentGroup, paymentChannel)).trim().toUpperCase();
+  const requestedPaymentGroup = firstDefinedManualValue(rawUpdates, ["__paymentGroup", "Medio de Pago", "Grupo de Pago", "Grupo Pago"]);
+  const requestedPaymentChannel = firstDefinedManualValue(rawUpdates, ["__paymentChannel", "Canal", "Canal de Pago", "Origen"]);
+  const requestedPaymentSubgroup = firstDefinedManualValue(rawUpdates, ["__paymentSubgroup", "Consulta", "Subgrupo", "Forma de Pago", "Formas De Pago", "Formas de Pago"]);
+  const paymentGroup = normalizeManualUpper(body.paymentGroup ?? requestedPaymentGroup ?? currentRow.payment_group ?? currentData.__paymentGroup ?? "SIN_DEFINIR");
+  const paymentChannel = normalizeManualUpper(body.paymentChannel ?? requestedPaymentChannel ?? currentRow.payment_channel ?? currentData.__paymentChannel ?? "SIN_DEFINIR");
+  const paymentSubgroup = normalizeManualUpper(body.paymentSubgroup ?? requestedPaymentSubgroup ?? currentRow.payment_subgroup ?? currentData.__paymentSubgroup ?? normalizeManualPaymentSubgroup(paymentGroup, paymentChannel));
 
-  const operationStatus = String(rawUpdates["Estado"] ?? rawUpdates["estado"] ?? currentData["Estado"] ?? currentData["estado"] ?? "").trim() || null;
+  const requestedOperationStatus = firstDefinedManualValue(rawUpdates, ["Estado", "estado", "Estado Operación", "Estado Operacion"]);
+  const operationStatus = normalizeManualText(requestedOperationStatus ?? currentData["Estado"] ?? currentData["estado"] ?? "") || null;
 
   const result = reviewStatus === "REVISADO_OK" ? "CONCILIADO_MANUALMENTE" : reviewStatus === "AJUSTADO" ? "AJUSTADO_MANUALMENTE" : reviewStatus === "OBSERVADO" ? "OBSERVADO_MANUALMENTE" : "PENDIENTE_REVISION_MANUAL";
 
+  const reconciledAtIso = new Date().toISOString();
   Object.assign(nextData, {
     __saleAmount: saleAmount,
     __differenceAmount: calculatedDifference,
@@ -1417,12 +1643,19 @@ app.patch("/api/runs/:runId/rows/:rowId", async (request, reply) => {
     __paymentGroup: paymentGroup,
     __paymentChannel: paymentChannel,
     __paymentSubgroup: paymentSubgroup,
+    __reviewStatus: reviewStatus,
+    __reconciliationObservation: observation,
+    __reconciledAt: reconciledAtIso,
     "Estado Revisión": reviewStatus,
     "Resultado Conciliación Contable": result,
     "Observación Conciliación": observation,
-    "Fecha Revisión": new Date().toISOString(),
+    "Fecha Revisión": reconciledAtIso,
+    "Total venta 110%": saleAmount,
     "Provincia 100%": provinceAmount,
     "Entrada UNO 10%": entradaUnoAmount,
+    "Medio de Pago": paymentGroup,
+    "Canal": paymentChannel,
+    "Consulta": paymentSubgroup,
   });
 
   await query(

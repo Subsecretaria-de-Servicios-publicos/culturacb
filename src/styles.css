@@ -3489,3 +3489,46 @@ body,
   border-color: #2563eb;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16);
 }
+
+.append-target-notice {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid rgba(37, 99, 235, 0.22);
+  border-radius: 16px;
+  background: rgba(37, 99, 235, 0.06);
+  color: #334155;
+  font-weight: 600;
+}
+
+
+/* Fix: botones de carga visibles sobre tarjetas blancas */
+.system-card .button-row .secondary.button,
+.system-card .button-row a.secondary.button,
+.work-tab-panel .button-row .secondary.button,
+.work-tab-panel .button-row a.secondary.button {
+  background: #eef2ff !important;
+  color: #153a8a !important;
+  border: 1px solid #bcd1ff !important;
+  box-shadow: 0 10px 24px rgba(37, 99, 235, 0.12) !important;
+  backdrop-filter: none !important;
+  text-decoration: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-height: 46px !important;
+}
+
+.system-card .button-row .secondary.button:hover,
+.system-card .button-row a.secondary.button:hover,
+.work-tab-panel .button-row .secondary.button:hover,
+.work-tab-panel .button-row a.secondary.button:hover {
+  background: #dbe7ff !important;
+  color: #0f2f78 !important;
+}
+
+.system-card .button-row .secondary.button:disabled,
+.work-tab-panel .button-row .secondary.button:disabled {
+  color: #64748b !important;
+  background: #f1f5f9 !important;
+  border-color: #dbe3ef !important;
+}

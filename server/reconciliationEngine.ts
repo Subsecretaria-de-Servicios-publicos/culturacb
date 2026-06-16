@@ -103,6 +103,23 @@ function normalizeHeader(value: unknown): string {
   return normalizeText(value).replace(/\s+/g, "");
 }
 
+function normalizeHeaderLoose(value: unknown): string {
+  return normalizeText(value).replace(/[^a-z0-9]/g, "");
+}
+
+function headerCellMatches(cell: unknown, requiredHeader: string): boolean {
+  const cellStrict = normalizeHeader(cell);
+  const requiredStrict = normalizeHeader(requiredHeader);
+  if (cellStrict === requiredStrict) return true;
+
+  const cellLoose = normalizeHeaderLoose(cell);
+  const requiredLoose = normalizeHeaderLoose(requiredHeader);
+  if (!cellLoose || !requiredLoose) return false;
+
+  // Permite detectar encabezados como "Precio Final S/Interes" cuando el requisito es "Precio Final".
+  return cellLoose === requiredLoose || cellLoose.startsWith(requiredLoose) || cellLoose.includes(requiredLoose);
+}
+
 function normalizeKey(value: unknown): string {
   const raw = String(value ?? "").trim();
   if (!raw) return "";
@@ -122,10 +139,34 @@ function getRowValueByHeaders(row: ExcelRow, headers: string[]): unknown {
     if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
   }
   const normalizedTargets = new Set(headers.map((header) => normalizeHeader(header)));
+  const looseTargets = headers.map((header) => normalizeHeaderLoose(header));
   for (const [key, value] of Object.entries(row)) {
-    if (normalizedTargets.has(normalizeHeader(key))) return value;
+    const normalizedKey = normalizeHeader(key);
+    if (normalizedTargets.has(normalizedKey)) return value;
+
+    const looseKey = normalizeHeaderLoose(key);
+    if (looseTargets.some((target) => looseKey === target || looseKey.startsWith(target) || looseKey.includes(target))) return value;
   }
   return undefined;
+}
+
+function ensureCanonicalField(row: ExcelRow, canonicalHeader: string, aliases: string[]): void {
+  if (Object.prototype.hasOwnProperty.call(row, canonicalHeader)) return;
+  const value = getRowValueByHeaders(row, aliases);
+  if (value !== undefined) row[canonicalHeader] = value as string | number | boolean | null | undefined;
+}
+
+function normalizeEntradaRow(row: ExcelRow): ExcelRow {
+  ensureCanonicalField(row, "Orden#", ["Orden#", "Orden #", "Orden", "Nro Orden", "Nro. Orden", "Número de Orden", "Numero de Orden"]);
+  ensureCanonicalField(row, "Estado", ["Estado", "Estado Operación", "Estado Operacion"]);
+  ensureCanonicalField(row, "Precio Final S/Interes", [
+    "Precio Final S/Interes",
+    "Precio Final S/Interés",
+    "Precio Final",
+    "Precio Final Sin Interes",
+    "Precio Final Sin Interés",
+  ]);
+  return row;
 }
 
 function getProvinceBaseAmount(row: ExcelRow): number {
@@ -209,12 +250,11 @@ function firstSheetRows(workbook: XLSX.WorkBook): unknown[][] {
 }
 
 function findHeaderRow(rows: unknown[][], requiredHeaders: string[], fallbackIndex: number): number {
-  const normalizedRequired = requiredHeaders.map(normalizeHeader);
-  const searchLimit = Math.min(rows.length, 25);
+  const searchLimit = Math.min(rows.length, 40);
 
   for (let rowIndex = 0; rowIndex < searchLimit; rowIndex += 1) {
-    const normalizedCells = (rows[rowIndex] ?? []).map(normalizeHeader);
-    const matched = normalizedRequired.every((required) => normalizedCells.includes(required));
+    const cells = rows[rowIndex] ?? [];
+    const matched = requiredHeaders.every((required) => cells.some((cell) => headerCellMatches(cell, required)));
     if (matched) return rowIndex;
   }
 
@@ -453,7 +493,7 @@ export function processBuffers(entradaBuffer: Buffer, pagoBuffer: Buffer, qrBuff
   const pagoHeaderIndex = findHeaderRow(pagoRowsRaw, ["ID de Operación", "Monto"], DEFAULT_PAGO_HEADER_ROW_INDEX);
   const qrHeaderIndex = qrWorkbook ? findHeaderRow(qrRowsRaw, ["id Operacion", "Bruto", "Neto"], DEFAULT_QR_HEADER_ROW_INDEX) : DEFAULT_QR_HEADER_ROW_INDEX;
 
-  const entradaRows = rowToObjects(entradaRowsRaw, entradaHeaderIndex, entradaHeaderIndex + 1);
+  const entradaRows = rowToObjects(entradaRowsRaw, entradaHeaderIndex, entradaHeaderIndex + 1).map(normalizeEntradaRow);
   const pagoRows = rowToObjects(pagoRowsRaw, pagoHeaderIndex, pagoHeaderIndex + 1);
   const qrRows = qrWorkbook ? rowToObjects(qrRowsRaw, qrHeaderIndex, qrHeaderIndex + 1) : [];
 
@@ -582,15 +622,13 @@ export function processBuffers(entradaBuffer: Buffer, pagoBuffer: Buffer, qrBuff
 
 export function buildExcelBuffer(rows: JoinedRow[], columns: string[]): Buffer {
   const exportColumns = columns.length ? columns : collectExportColumns(rows);
-  const headers = exportColumns.map(labelColumn);
+  const data = rows.map((row) => {
+    const output: Record<string, unknown> = {};
+    for (const column of exportColumns) output[labelColumn(column)] = row[column];
+    return output;
+  });
 
-  // Array-of-arrays evita crear objetos intermedios por cada fila (menor uso de RAM)
-  const aoa: unknown[][] = [headers];
-  for (const row of rows) {
-    aoa.push(exportColumns.map((col) => row[col] ?? ""));
-  }
-
-  const worksheet = XLSX.utils.aoa_to_sheet(aoa);
+  const worksheet = XLSX.utils.json_to_sheet(data, { header: exportColumns.map(labelColumn) });
   const range = XLSX.utils.decode_range(worksheet["!ref"] ?? "A1:A1");
   worksheet["!autofilter"] = { ref: XLSX.utils.encode_range(range) };
   worksheet["!cols"] = exportColumns.map((column) => ({ wch: Math.min(Math.max(labelColumn(column).length + 4, 14), 42) }));

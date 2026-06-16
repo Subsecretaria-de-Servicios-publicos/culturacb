@@ -4,7 +4,7 @@ import { DataTable } from "./components/DataTable";
 import { FileDrop } from "./components/FileDrop";
 import { PowerBiFilters } from "./components/PowerBiFilters";
 import { SummaryCards } from "./components/SummaryCards";
-import { clearStoredToken, exportRunUrl, createUser, fetchDashboard, fetchMe, fetchRows, fetchRun, fetchRuns, fetchRoles, fetchUserAuditLogs, fetchUsers, getStoredToken, importReconciliation, login, updateRunNotes, updateRunRow, updateRolePermissions, updateUser, updateUserPassword } from "./services/api";
+import { clearStoredToken, exportRunUrl, createUser, fetchDashboard, fetchMe, fetchRows, fetchRun, fetchRuns, fetchRoles, fetchUserAuditLogs, fetchUsers, getStoredToken, importReconciliation, appendMonthToRun, login, updateRunNotes, updateRunRow, updateRolePermissions, updateUser, updateUserPassword } from "./services/api";
 import type { AppRole, DashboardResponse, ImportResponse, ManagedUser, ManualRowUpdate, MenuKey, RowsResponse, RunMetadata, TableFilters, RoleDefinition, UserAuditLog, UserSession } from "./types/reconciliation";
 
 type WorkTab = "expediente" | "conciliacionEntradaUno" | "calculadoraPrecios" | "auditoria" | "usuariosRoles" | "resumen" | "consultas" | "filtros";
@@ -123,8 +123,9 @@ function provinceMatrixGroup(subgroupKey: string, groupKey?: string): ProvinceMa
   const subgroup = normalizeKey(subgroupKey || groupKey || "");
   if (subgroup === "EFECTIVO") return "EFECTIVO";
   if (subgroup === "QR") return "QR";
-  // En este cuadro, TC debe tomar únicamente la tarjeta de Boletería.
-  // La tarjeta WEB no forma parte de la fila TC.
+  // En el Resumen Provincia, la fila TC mantiene el criterio original:
+  // suma solo TARJETA_CREDITO_DEBITO_BOLETERIA.
+  // No se incluye TARJETA_CREDITO_DEBITO_WEB para evitar inflar los importes.
   if (subgroup === "TARJETA_CREDITO_DEBITO_BOLETERIA") return "TC";
   return null;
 }
@@ -536,29 +537,115 @@ function EntradaUnoConciliacionTab({
     return String(value || "")
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^A-Z0-9\s]/gi, " ")
       .replace(/\s+/g, " ")
       .trim()
       .toUpperCase();
   }
 
-  const establishmentOrderMap = new Map(
-    establishmentColumnOrder.map((name, index) => [normalizeEstablishmentName(name), index])
+  const officialEstablishmentByNormalized = new Map(
+    establishmentColumnOrder.map((name) => [normalizeEstablishmentName(name), name])
   );
 
-  const provinceMatrixColumns = establishmentRows
-    .map((item) => ({
-      key: String(item.key || "SIN_DEFINIR"),
-      label: String(item.label || item.key || "Sin definir"),
-    }))
-    .sort((a, b) => {
-      const orderA = establishmentOrderMap.get(normalizeEstablishmentName(a.label));
-      const orderB = establishmentOrderMap.get(normalizeEstablishmentName(b.label));
+  function canonicalEstablishmentName(value: string): string {
+    const raw = String(value || "").replace(/\s+/g, " ").trim();
+    const normalized = normalizeEstablishmentName(raw);
+    const compact = normalized.replace(/\s+/g, "");
+    const exact = officialEstablishmentByNormalized.get(normalized);
+    if (exact) return exact;
 
-      if (orderA !== undefined && orderB !== undefined) return orderA - orderB;
-      if (orderA !== undefined) return -1;
-      if (orderB !== undefined) return 1;
-      return a.label.localeCompare(b.label, "es");
-    });
+    const explicitAliases: Record<string, string> = {
+      "CAMPING Y PARQUE ACUATICO EL PRESTAMO": "Camping y Parque Acuático EL PRÉSTAMO",
+      "CAMPING Y PARQUE ACUTICO EL PRSTAMO": "Camping y Parque Acuático EL PRÉSTAMO",
+      "EL CAMPING Y PARQUE ACUATICO EL PRESTAMO": "Camping y Parque Acuático EL PRÉSTAMO",
+      "EL CAMPING Y PARQUE ACUTICO EL PRSTAMO": "Camping y Parque Acuático EL PRÉSTAMO",
+    };
+    const explicit = explicitAliases[normalized];
+    if (explicit) return explicit;
+
+    // Alias defensivo: evita columnas duplicadas por nombres escritos sin acentos,
+    // con caracteres omitidos o con variantes como las que vienen en los Excel originales.
+    if (normalized.includes("TEATRO PROVINCIAL") || normalized.includes("JUAN CARLOS SARAVIA")) {
+      return "Teatro Provincial Juan Carlos Saravia";
+    }
+    if (normalized.includes("MUSEO GUEMES") || normalized.includes("MUSEO GEMES") || compact.includes("MUSEOGEMES")) {
+      return "Museo Güemes";
+    }
+    if (normalized.includes("VID") && normalized.includes("VINO")) return "Museo de la Vid y el Vino";
+    if (
+      (normalized.includes("ARQUEOLOGIA") || normalized.includes("ARQUEOLOGA") || compact.includes("ARQUEOLOGIA") || compact.includes("ARQUEOLOGA"))
+      && (normalized.includes("ALTA MONTANA") || normalized.includes("ALTA MONTAA") || compact.includes("ALTAMONTANA") || compact.includes("ALTAMONTAA"))
+    ) {
+      return "Museo de Arqueología de Alta Montaña";
+    }
+    if (
+      (normalized.includes("ARQUEOLOGICO") || normalized.includes("ARQUEOLGICO") || compact.includes("ARQUEOLOGICO") || compact.includes("ARQUEOLGICO"))
+      && normalized.includes("CACHI")
+    ) {
+      return "Museo Arqueológico de Cachi";
+    }
+    if (normalized.includes("USINA CULTURAL")) return "Usina Cultural";
+    if (
+      normalized.includes("EXPLORA SALTA")
+      || normalized.includes("COMPLEJO MUSEOLOGICO")
+      || normalized.includes("COMPLEJO MUSEOLGICO")
+      || compact.includes("COMPLEJOMUSEOLOGICOEXPLORASALTA")
+      || compact.includes("COMPLEJOMUSEOLGICOEXPLORASALTA")
+    ) {
+      return "Complejo Museológico Explora Salta";
+    }
+    if (normalized.includes("CASA DE LA CULTURA")) return "Casa de la Cultura";
+    if (normalized.includes("ARTE MAC") || normalized === "MAC" || normalized.includes("MUSEO MAC")) {
+      return "Museo de Arte MAC";
+    }
+    if (normalized.includes("BELLAS ARTES")) return "Museo de Bellas Artes";
+    if (normalized.includes("ANTROPOLOGICO") || normalized.includes("ANTROPOLOGI") || compact.includes("ANTROPOLOGICO")) {
+      return "Museo Antropológico";
+    }
+    if (
+      normalized.includes("CAMPING")
+      || normalized.includes("PRESTAMO")
+      || normalized.includes("PRSTAMO")
+      || normalized.includes("PARQUE ACUATICO")
+      || normalized.includes("PARQUE ACUTICO")
+      || compact.includes("CAMPINGYPARQUEACUTICOELPRSTAMO")
+      || compact.includes("ELCAMPINGYPARQUEACUTICOELPRSTAMO")
+      || compact.includes("CAMPINGYPARQUEACUATICOELPRESTAMO")
+      || compact.includes("ELCAMPINGYPARQUEACUATICOELPRESTAMO")
+    ) {
+      return "Camping y Parque Acuático EL PRÉSTAMO";
+    }
+
+    return String(value || "Sin definir").replace(/\s+/g, " ").trim() || "Sin definir";
+  }
+
+  const selectedEstablishmentCanonical = selectedEstablishment === "todos"
+    ? "todos"
+    : canonicalEstablishmentName(
+        establishmentRows.find((item) => String(item.key) === selectedEstablishment)?.label || selectedEstablishment
+      );
+
+  const extraProvinceMatrixColumnMap = new Map<string, { key: string; label: string }>();
+  (dashboard?.paymentMethodsByEstablishmentPaid ?? []).forEach((item) => {
+    const canonicalName = canonicalEstablishmentName(String(item.establishmentLabel || item.establishmentKey || "Sin definir"));
+    if (officialEstablishmentByNormalized.has(normalizeEstablishmentName(canonicalName))) return;
+    const key = `__extra_establishment_${normalizeEstablishmentName(canonicalName)}`;
+    if (!extraProvinceMatrixColumnMap.has(key)) {
+      extraProvinceMatrixColumnMap.set(key, { key, label: canonicalName });
+    }
+  });
+
+  const provinceMatrixColumns = [
+    ...establishmentColumnOrder.map((officialName) => ({
+      key: `__official_establishment_${normalizeEstablishmentName(officialName)}`,
+      label: officialName,
+    })),
+    ...Array.from(extraProvinceMatrixColumnMap.values()).sort((a, b) => a.label.localeCompare(b.label, "es")),
+  ];
+
+  const provinceMatrixColumnKeyByCanonical = new Map(
+    provinceMatrixColumns.map((column) => [canonicalEstablishmentName(column.label), column.key])
+  );
 
   const provinceMatrixBase = provinceMatrixColumns.reduce<Record<string, Record<ProvinceMatrixRowKey, number>>>((acc, item) => {
     acc[item.key] = { EFECTIVO: 0, TC: 0, QR: 0 };
@@ -566,10 +653,14 @@ function EntradaUnoConciliacionTab({
   }, {});
 
   (dashboard?.paymentMethodsByEstablishmentPaid ?? [])
-    .filter((item) => selectedEstablishment === "todos" || String(item.establishmentKey) === selectedEstablishment)
+    .filter((item) => {
+      if (selectedEstablishment === "todos") return true;
+      return canonicalEstablishmentName(String(item.establishmentLabel || item.establishmentKey || "Sin definir")) === selectedEstablishmentCanonical;
+    })
     .forEach((item) => {
-      const estKey = String(item.establishmentKey || "SIN_DEFINIR");
-      if (!provinceMatrixBase[estKey]) return;
+      const canonicalName = canonicalEstablishmentName(String(item.establishmentLabel || item.establishmentKey || "Sin definir"));
+      const estKey = provinceMatrixColumnKeyByCanonical.get(canonicalName);
+      if (!estKey || !provinceMatrixBase[estKey]) return;
       const rowKey = provinceMatrixGroup(String(item.subgroupKey || ""), String(item.groupKey || ""));
       if (!rowKey) return;
       provinceMatrixBase[estKey][rowKey] += Number(item.provinceAmount || 0);
@@ -926,7 +1017,7 @@ function EntradaUnoConciliacionTab({
         </div>
 
         <div className="channel-help">
-          <strong>Criterio:</strong> se toma el valor de <strong>Provincia 100%</strong> por establecimiento y forma de pago. La fila <strong>TC</strong> toma solo <strong>TARJETA_CREDITO_DEBITO_BOLETERIA</strong>. La fila <strong>Entradas</strong> suma Efectivo + TC + QR, y la fila <strong>10%</strong> calcula el 10% lineal sobre esa suma.
+          <strong>Criterio:</strong> se toma el valor de <strong>Provincia 100%</strong> por establecimiento y forma de pago. La fila <strong>TC</strong> toma tarjetas de crédito/débito de <strong>Boletería y Web</strong>. La fila <strong>Entradas</strong> suma Efectivo + TC + QR, y la fila <strong>10%</strong> calcula el 10% lineal sobre esa suma.
         </div>
       </article>
 
@@ -1908,7 +1999,7 @@ function UsersRolesTab({ currentUser }: { currentUser: UserSession }) {
 }
 
 function LoginScreen({ onLogin }: { onLogin: (user: UserSession) => void }) {
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState("admin@conciliacion.local");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1984,6 +2075,7 @@ export default function App() {
   const [notes, setNotes] = useState("");
   const [savingNotes, setSavingNotes] = useState(false);
   const [loadingImport, setLoadingImport] = useState(false);
+  const [loadingAppendMonth, setLoadingAppendMonth] = useState(false);
   const [loadingRows, setLoadingRows] = useState(false);
   const [loadingDashboard, setLoadingDashboard] = useState(false);
   const [loadingRuns, setLoadingRuns] = useState(false);
@@ -2075,6 +2167,44 @@ export default function App() {
       setError(err instanceof Error ? err.message : "No se pudo procesar la conciliación.");
     } finally {
       setLoadingImport(false);
+    }
+  }
+
+  async function handleAppendMonthToCurrentRun() {
+    const targetRunId = run?.runId || runs[0]?.id || "";
+    if (!targetRunId) {
+      setError("Primero debe existir un expediente guardado para poder sumar un mes.");
+      return;
+    }
+    if (!entradaFile || !pagoFile) {
+      setError("Cargá los archivos Entrada UNO y Pago UNO del mes que querés sumar al expediente actual.");
+      return;
+    }
+    setError("");
+    setLoadingAppendMonth(true);
+    try {
+      const imported = await appendMonthToRun(targetRunId, entradaFile, pagoFile, qrFile);
+      const metadata = await fetchRun(targetRunId);
+      setRun(runToImportResponse(metadata));
+      setNotes(metadata.notes || "");
+      setFilters(DEFAULT_FILTERS);
+      setActiveMenu("entrada1");
+      setActiveWorkTab("conciliacionEntradaUno");
+      setShowUploadPanel(false);
+      setHasAutoOpenedRun(true);
+      const [nextRows, nextDashboard] = await Promise.all([
+        fetchRows(targetRunId, "entrada1", DEFAULT_FILTERS),
+        fetchDashboard(targetRunId, DEFAULT_FILTERS),
+        loadRuns(),
+      ]);
+      setRowsResponse(nextRows);
+      setDashboard(nextDashboard);
+      setError(`Mes agregado al expediente actual. Filas nuevas: ${imported.appendedRows}. Duplicadas omitidas: ${imported.duplicateRowsSkipped}.`);
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : "No se pudo sumar el mes al expediente actual.");
+    } finally {
+      setLoadingAppendMonth(false);
     }
   }
 
@@ -2234,6 +2364,9 @@ export default function App() {
       .includes(query);
   });
 
+  const appendTargetRunId = run?.runId || runs[0]?.id || "";
+  const appendTargetRunName = runs.find((item) => item.id === appendTargetRunId)?.entrada_filename || "expediente actual";
+
   if (checkingSession) return <main className="loading-screen">Verificando sesión...</main>;
   if (!user) return <LoginScreen onLogin={setUser} />;
 
@@ -2353,7 +2486,7 @@ export default function App() {
         <div className="section-title">
           <span>Paso 1</span>
           <h2>Cargar archivos y guardar conciliación</h2>
-          <p>El navegador solo envía los archivos. El cruce, la unión completa y los filtros se ejecutan desde el backend contra PostgreSQL.</p>
+          <p>Usá “Procesar y guardar Paso 1” para crear un expediente nuevo, o “Sumar mes al expediente actual” para agregar registros nuevos al expediente abierto sin duplicar Orden# ya existentes.</p>
         </div>
 
         <div className="upload-grid">
@@ -2378,10 +2511,18 @@ export default function App() {
         </div>
 
         {error && <div className="error">{error}</div>}
+        {appendTargetRunId && (
+          <div className="append-target-notice">
+            El botón “Sumar mes al expediente actual” agregará los archivos cargados al expediente abierto: <strong>{appendTargetRunName}</strong>.
+          </div>
+        )}
 
         <div className="button-row">
-          <button className="primary button" onClick={handleProcess} disabled={loadingImport}>
+          <button className="primary button" onClick={handleProcess} disabled={loadingImport || loadingAppendMonth}>
             {loadingImport ? "Procesando y guardando en BD..." : "Procesar y guardar Paso 1"}
+          </button>
+          <button className="secondary button" type="button" onClick={handleAppendMonthToCurrentRun} disabled={!appendTargetRunId || loadingImport || loadingAppendMonth}>
+            {loadingAppendMonth ? "Sumando mes al expediente..." : "Sumar mes al expediente actual"}
           </button>
           {run && (
             <a className="secondary button" href={exportRunUrl(run.runId)}>
