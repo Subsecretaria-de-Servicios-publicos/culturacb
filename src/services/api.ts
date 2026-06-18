@@ -1,6 +1,6 @@
 import type { DashboardResponse, ImportResponse, LoginResponse, CreateUserPayload, ManagedUser, ManualRowUpdate, MenuKey, RowsResponse, RunMetadata, TableFilters, UpdateRolePermissionsPayload, UpdateUserPayload, UserAuditLog, UserSession, RoleDefinition } from "../types/reconciliation";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4108";
+const API_URL = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 const TOKEN_KEY = "conciliacion_cultura_uno_token";
 
 export function getStoredToken(): string {
